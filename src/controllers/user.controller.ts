@@ -1,8 +1,9 @@
-import { ApiError } from "../utils/ApiError";
+import { AppError } from "../utils/AppError";
+import { ApiError } from "../utils/ApiError"; // legacy – remaining secondary handlers still use this
 import { ApiResponse } from "../utils/ApiResponse";
 import prisma from "../utils/prismClient";
 import bcrypt from "bcrypt";
-import { Response } from "express";
+import { Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
 import { generateAccessToken, generateRefreshToken } from "../utils/jwt";
 import { Prisma } from "@prisma/client";
@@ -31,11 +32,11 @@ const generateToken = async (userId: string) => {
 
     return { accessToken, refreshToken };
   } catch (err) {
-    throw new ApiError(500, "Error in generating token");
+    throw new AppError("Error in generating token", 500, false);
   }
 };
 
-const signup = async (req: Request, res: any) => {
+const signup = async (req: Request, res: any, next: NextFunction) => {
   const {
     firstName,
     lastName,
@@ -57,9 +58,7 @@ const signup = async (req: Request, res: any) => {
     email.trim() === "" ||
     password.trim() === ""
   ) {
-    return res
-      .status(400)
-      .json(new ApiError(400, "Name, email, and password are required"));
+    return next(new AppError("Name, email, and password are required", 400));
   }
   if (role === "DOCTOR") {
     if (
@@ -68,15 +67,11 @@ const signup = async (req: Request, res: any) => {
       specialty.trim() === "" ||
       clinicLocation.trim() === ""
     ) {
-      return res
-        .status(400)
-        .json(new ApiError(400, "All doctor fields are required"));
+      return next(new AppError("All doctor fields are required", 400));
     }
   } else if (role === "PATIENT") {
     if (!location || location.trim() === "") {
-      return res
-        .status(400)
-        .json(new ApiError(400, "Location is required for patients"));
+      return next(new AppError("Location is required for patients", 400));
     }
   }
 
@@ -93,7 +88,7 @@ const signup = async (req: Request, res: any) => {
     });
 
     if (existingUser) {
-      return res.status(409).json(new ApiError(409, "Username already taken"));
+      return next(new AppError("Username already taken", 409));
     }
 
     existingUser = await prisma.user.findUnique({
@@ -101,7 +96,7 @@ const signup = async (req: Request, res: any) => {
     });
 
     if (existingUser) {
-      return res.status(409).json(new ApiError(409, "User already exists"));
+      return next(new AppError("User already exists", 409));
     }
     const hashedPassword = await bcrypt.hash(password, 10);
     const verificationToken = generateVerificationToken();
@@ -288,7 +283,7 @@ const verifyEmail = async (req: Request, res: any) => {
   }
 };
 
-const resendVerificationEmail = async (req: Request, res: any) => {
+const resendVerificationEmail = async (req: Request, res: any, next: NextFunction) => {
   try {
     const { email } = req.body;
 
@@ -342,14 +337,11 @@ const resendVerificationEmail = async (req: Request, res: any) => {
         "Verification email sent successfully"
       ));
   } catch (err) {
-    console.error(err);
-    return res
-      .status(500)
-      .json(new ApiError(500, "Internal server error", [err]));
+    return next(err);
   }
 };
 
-const adminSignup = async (req: Request, res: any) => {
+const adminSignup = async (req: Request, res: any, next: NextFunction) => {
   const { firstName, lastName, email, password } = req.body;
 
   const name = `${firstName || ""} ${lastName || ""}`.trim();
@@ -362,9 +354,7 @@ const adminSignup = async (req: Request, res: any) => {
     email.trim() === "" ||
     password.trim() === ""
   ) {
-    return res
-      .status(400)
-      .json(new ApiError(400, "Name, email, and password are required"));
+    return next(new AppError("Name, email, and password are required", 400));
   }
 
   const passwordValidation = validatePassword(password);
@@ -380,7 +370,7 @@ const adminSignup = async (req: Request, res: any) => {
     });
 
     if (existingUser) {
-      return res.status(409).json(new ApiError(409, "Username already taken"));
+      return next(new AppError("Username already taken", 409));
     }
 
     existingUser = await prisma.user.findUnique({
@@ -388,7 +378,7 @@ const adminSignup = async (req: Request, res: any) => {
     });
 
     if (existingUser) {
-      return res.status(409).json(new ApiError(409, "User already exists"));
+      return next(new AppError("User already exists", 409));
     }
     const hashedPassword = await bcrypt.hash(password, 10);
 
@@ -427,21 +417,21 @@ const adminSignup = async (req: Request, res: any) => {
         new ApiResponse(200, { user: result.user }, "Admin signup successful")
       );
   } catch (err) {
-    console.error(err);
-    return res
-      .status(500)
-      .json(new ApiError(500, "Internal server error", [err]));
+    return next(err);
   }
 };
 
-const login = async (req: any, res: any) => {
+const login = async (req: any, res: any, next: NextFunction) => {
   const { data, password } = req.body;
   try {
-    if (!data || !password) {
-      return res.status(400).json(new ApiError(400, "username or email and password are required"));
+    if (!data) {
+      throw new AppError("Username or email is required", 400);
+    }
+    if (!password) {
+      throw new AppError("Password is required", 400);
     }
     if ([password, data].some((field) => field.trim() === "")) {
-      return res.status(400).json(new ApiError(400, "All fields are required"));
+      throw new AppError("All fields are required", 400);
     }
 
     const user = await prisma.user.findFirst({
@@ -454,9 +444,7 @@ const login = async (req: any, res: any) => {
     });
 
     if (!user) {
-      return res
-        .status(401)
-        .json(new ApiError(401, "Invalid username or password"));
+      throw new AppError("Invalid username or password", 401);
     }
 
     if (user.deletedAt) {
@@ -467,9 +455,7 @@ const login = async (req: any, res: any) => {
 
     const match = await bcrypt.compare(password, user.password);
     if (!match) {
-      return res
-        .status(401)
-        .json(new ApiError(401, "Invalid username or password"));
+      throw new AppError("Invalid username or password", 401);
     }
 
     if (!user.isEmailVerified) {
@@ -508,11 +494,11 @@ const login = async (req: any, res: any) => {
         ),
       );
   } catch (err) {
-    return res.status(500).json(new ApiError(500, "Internal server error"));
+    return next(err);
   }
 };
 
-const logout = async (req: any, res: any) => {
+const logout = async (req: any, res: any, next: NextFunction) => {
   try {
     const id = (req as any).user.id;
 
@@ -536,7 +522,7 @@ const logout = async (req: any, res: any) => {
       .clearCookie("refreshToken", options)
       .json(new ApiResponse(200, "Logout successfully"));
   } catch (err) {
-    return res.status(500).json(new ApiError(500, "internal server error"));
+    return next(err);
   }
 };
 

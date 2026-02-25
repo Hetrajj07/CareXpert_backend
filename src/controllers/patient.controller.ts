@@ -1,5 +1,6 @@
-import { Request, Response } from "express";
-import { ApiError } from "../utils/ApiError";
+import { Request, Response, NextFunction } from "express";
+import { AppError } from "../utils/AppError";
+import { ApiError } from "../utils/ApiError"; // legacy – secondary handlers still use this
 import { ApiResponse } from "../utils/ApiResponse";
 import prisma from "../utils/prismClient";
 import { isValidUUID, UserInRequest } from "../utils/helper";
@@ -13,7 +14,7 @@ import PDFDocument from "pdfkit";
 import fs from "fs";
 import cacheService from "../utils/cacheService";
 
-const searchDoctors = async (req: any, res: Response) => {
+const searchDoctors = async (req: any, res: Response, next: NextFunction) => {
   const { specialty, location } = req.query;
 
   try {
@@ -66,19 +67,18 @@ const searchDoctors = async (req: any, res: Response) => {
     await cacheService.set(cacheKey, doctors, 3600);
     res.status(200).json(new ApiResponse(200, doctors));
   } catch (error) {
-    res.status(500).json(new ApiError(500, "Internal Server Error", [error]));
+    return next(error);
   }
 };
 
-const availableTimeSlots = async (req: any, res: Response): Promise<void> => {
+const availableTimeSlots = async (req: any, res: Response, next: NextFunction): Promise<void> => {
   const { doctorId } = (req as any).params;
   const date = req.query.date as string | undefined;
 
   try {
     
     if (!doctorId || !isValidUUID(doctorId)) {
-      res.status(400).json(new ApiError(400, "Invalid Doctor ID"));
-      return;
+      throw new AppError("Invalid Doctor ID", 400);
     }
 
     const doctor = await prisma.doctor.findUnique({
@@ -86,8 +86,7 @@ const availableTimeSlots = async (req: any, res: Response): Promise<void> => {
     });
 
     if (!doctor) {
-      res.status(400).json(new ApiError(400, "Doctor not available"));
-      return;
+      throw new AppError("Doctor not available", 404);
     }
 
     const whereCondition: any = {
@@ -98,12 +97,7 @@ const availableTimeSlots = async (req: any, res: Response): Promise<void> => {
     if (date) {
       const selectedDate = new Date(date as string);
       if (isNaN(selectedDate.getTime())) {
-        res
-          .status(400)
-          .json(
-            new ApiError(400, "Invalid Date format use ISO format(YYYY-MM-DD)")
-          );
-        return;
+        throw new AppError("Invalid Date format use ISO format(YYYY-MM-DD)", 400);
       }
 
       const startOfDay = new Date(selectedDate);
@@ -154,11 +148,11 @@ const availableTimeSlots = async (req: any, res: Response): Promise<void> => {
 
     res.status(200).json(new ApiResponse(200, formattedSlots));
   } catch (error) {
-    res.status(400).json(new ApiError(400, "Internal Server Error", [error]));
+    return next(error);
   }
 };
 
-const bookAppointment = async (req: any, res: Response): Promise<void> => {
+const bookAppointment = async (req: any, res: Response, next: NextFunction): Promise<void> => {
   const { timeSlotId } = req.body;
   
   const userId = (req as any).user?.id;
@@ -170,15 +164,11 @@ const bookAppointment = async (req: any, res: Response): Promise<void> => {
   try {
     
     if (!patient) {
-      res
-        .status(400)
-        .json(new ApiError(400, "Only patients can book appointments!"));
-      return;
+      throw new AppError("Only patients can book appointments!", 403);
     }
 
     if (!timeSlotId) {
-      res.status(400).json(new ApiError(400, "Time slot id is required"));
-      return;
+      throw new AppError("Time slot id is required", 400);
     }
 
     const result = await prisma.$transaction(async (prisma) => {
@@ -200,11 +190,11 @@ const bookAppointment = async (req: any, res: Response): Promise<void> => {
       });
 
       if (!timeSlot) {
-        throw new ApiError(404, "Time slot not found");
+        throw new AppError("Time slot not found", 404);
       }
 
       if (timeSlot.status !== TimeSlotStatus.AVAILABLE) {
-        throw new ApiError(400, "Time slot is already booked");
+        throw new AppError("This time slot is already booked", 409);
       }
 
       const existingAppointment = await prisma.appointment.findFirst({
@@ -225,7 +215,7 @@ const bookAppointment = async (req: any, res: Response): Promise<void> => {
       });
       
       if (existingAppointment) {
-        throw new ApiError(400, "You already have an appointment at this time");
+        throw new AppError("You already have an appointment in this time slot", 409);
       }
 
       const updateResult = await prisma.timeSlot.updateMany({
@@ -296,12 +286,7 @@ const bookAppointment = async (req: any, res: Response): Promise<void> => {
       })
     );
   } catch (error) {
-    if (error instanceof ApiError) {
-      res.status(error.statusCode).json(error);
-      return;
-    }
-
-    res.status(500).json(new ApiError(500, "Internal Server Error", [error]));
+    return next(error);
   }
 };
 
@@ -1115,7 +1100,7 @@ const getPatientNotifications = async (req: Request, res: Response): Promise<voi
 };
 
 const markNotificationAsRead = async (req: Request, res: Response): Promise<void> => {
-  const { notificationId } = req.params;
+  const notificationId = req.params.notificationId as string;
   const userId = (req as any).user?.id;
 
   try {
