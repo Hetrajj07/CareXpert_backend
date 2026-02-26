@@ -9,7 +9,6 @@ import {
 
 const router = express.Router();
 
-// Apply auth middleware to all analytics routes to ensure privacy
 router.use(isAuthenticated);
 
 router.get("/summary", getHealthSummary as any);

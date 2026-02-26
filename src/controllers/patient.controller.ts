@@ -1,5 +1,6 @@
-import { Request, Response } from "express";
-import { ApiError } from "../utils/ApiError";
+import { Request, Response, NextFunction } from "express";
+import { AppError } from "../utils/AppError";
+import { ApiError } from "../utils/ApiError"; // legacy – secondary handlers still use this
 import { ApiResponse } from "../utils/ApiResponse";
 import prisma from "../utils/prismClient";
 import { isValidUUID, UserInRequest } from "../utils/helper";
@@ -11,8 +12,9 @@ import {
 } from "@prisma/client";
 import PDFDocument from "pdfkit";
 import fs from "fs";
+import cacheService from "../utils/cacheService";
 
-const searchDoctors = async (req: any, res: Response) => {
+const searchDoctors = async (req: any, res: Response, next: NextFunction) => {
   const { specialty, location } = req.query;
 
   const specialtyQuery =
@@ -32,8 +34,14 @@ const searchDoctors = async (req: any, res: Response) => {
       );
     return;
   }
-
   try {
+    const cacheKey = `doctors:${specialtyQuery || 'all'}:${locationQuery || 'all'}`;
+    const cached = await cacheService.get(cacheKey);
+    
+    if (cached) {
+      return res.status(200).json(new ApiResponse(200, cached));
+    }
+
     const doctors = await prisma.doctor.findMany({
       where: {
         AND: [
@@ -41,7 +49,7 @@ const searchDoctors = async (req: any, res: Response) => {
             ? {
                 specialty: {
                   contains: specialtyQuery,
-                  mode: "insensitive", // Case-insensitive search
+                  mode: "insensitive",
                 },
               }
             : {},
@@ -49,13 +57,20 @@ const searchDoctors = async (req: any, res: Response) => {
             ? {
                 clinicLocation: {
                   contains: locationQuery,
-                  mode: "insensitive", // Case-insensitive search
+                  mode: "insensitive",
                 },
               }
             : {},
         ],
       },
-      include: {
+      select: {
+        id: true,
+        specialty: true,
+        clinicLocation: true,
+        experience: true,
+        education: true,
+        bio: true,
+        languages: true,
         user: {
           select: {
             name: true,
@@ -66,35 +81,31 @@ const searchDoctors = async (req: any, res: Response) => {
       },
     });
 
+    await cacheService.set(cacheKey, doctors, 3600);
     res.status(200).json(new ApiResponse(200, doctors));
   } catch (error) {
-    // console.error("Error in searchDoctors:", error);
-    res.status(500).json(new ApiError(500, "Internal Server Error", [error]));
+    return next(error);
   }
 };
 
-const availableTimeSlots = async (req: any, res: Response): Promise<void> => {
+const availableTimeSlots = async (req: any, res: Response, next: NextFunction): Promise<void> => {
   const { doctorId } = (req as any).params;
   const date = req.query.date as string | undefined;
 
   try {
-    // Validate doctorId format
+    
     if (!doctorId || !isValidUUID(doctorId)) {
-      res.status(400).json(new ApiError(400, "Invalid Doctor ID"));
-      return;
+      throw new AppError("Invalid Doctor ID", 400);
     }
 
-    // Check if doctor exists
     const doctor = await prisma.doctor.findUnique({
       where: { id: doctorId },
     });
 
     if (!doctor) {
-      res.status(400).json(new ApiError(400, "Doctor not available"));
-      return;
+      throw new AppError("Doctor not available", 404);
     }
 
-    // Build where condition
     const whereCondition: any = {
       doctorId,
       status: TimeSlotStatus.AVAILABLE,
@@ -103,15 +114,9 @@ const availableTimeSlots = async (req: any, res: Response): Promise<void> => {
     if (date) {
       const selectedDate = new Date(date as string);
       if (isNaN(selectedDate.getTime())) {
-        res
-          .status(400)
-          .json(
-            new ApiError(400, "Invalid Date format use ISO format(YYYY-MM-DD)")
-          );
-        return;
+        throw new AppError("Invalid Date format use ISO format(YYYY-MM-DD)", 400);
       }
 
-      // Set time range for the selected date
       const startOfDay = new Date(selectedDate);
       startOfDay.setHours(0, 0, 0, 0);
 
@@ -124,7 +129,6 @@ const availableTimeSlots = async (req: any, res: Response): Promise<void> => {
       };
     }
 
-    // Fetch available time slots
     const availableSlots = await prisma.timeSlot.findMany({
       where: whereCondition,
       orderBy: {
@@ -149,7 +153,6 @@ const availableTimeSlots = async (req: any, res: Response): Promise<void> => {
       },
     });
 
-    // Format the response
     const formattedSlots = availableSlots.map((slot) => ({
       id: slot.id,
       startTime: slot.startTime,
@@ -162,13 +165,13 @@ const availableTimeSlots = async (req: any, res: Response): Promise<void> => {
 
     res.status(200).json(new ApiResponse(200, formattedSlots));
   } catch (error) {
-    res.status(400).json(new ApiError(400, "Internal Server Error", [error]));
+    return next(error);
   }
 };
 
-const bookAppointment = async (req: any, res: Response): Promise<void> => {
+const bookAppointment = async (req: any, res: Response, next: NextFunction): Promise<void> => {
   const { timeSlotId } = req.body;
-  // const patientId = req.user?.patient?.id; // Get patient ID from authenticated user
+  
   const userId = (req as any).user?.id;
   const patient = await prisma.patient.findUnique({
     where: { userId },
@@ -176,23 +179,17 @@ const bookAppointment = async (req: any, res: Response): Promise<void> => {
   });
 
   try {
-    // Validate patient is logged in and has a patient profile
+    
     if (!patient) {
-      res
-        .status(400)
-        .json(new ApiError(400, "Only patients can book appointments!"));
-      return;
+      throw new AppError("Only patients can book appointments!", 403);
     }
 
-    // Validate timeSlotId
     if (!timeSlotId) {
-      res.status(400).json(new ApiError(400, "Time slot id is required"));
-      return;
+      throw new AppError("Time slot id is required", 400);
     }
 
-    // Use transaction to ensure atomicity
     const result = await prisma.$transaction(async (prisma) => {
-      // Get the time slot and check if it's available
+      
       const timeSlot = await prisma.timeSlot.findUnique({
         where: { id: timeSlotId },
         include: {
@@ -210,20 +207,13 @@ const bookAppointment = async (req: any, res: Response): Promise<void> => {
       });
 
       if (!timeSlot) {
-        res.status(404).json({
-          success: false,
-          message: "Time slot not found",
-        });
-        return;
+        throw new AppError("Time slot not found", 404);
       }
 
       if (timeSlot.status !== TimeSlotStatus.AVAILABLE) {
-        // throw new Error("This time slot is no longer available");
-        res.status(400).json(new ApiError(400, "Timeslote is already booked"));
-        return;
+        throw new AppError("This time slot is already booked", 409);
       }
 
-      // Check if patient already has an appointment at this time
       const existingAppointment = await prisma.appointment.findFirst({
         where: {
           status: {
@@ -240,59 +230,59 @@ const bookAppointment = async (req: any, res: Response): Promise<void> => {
           },
         },
       });
-      // console.log(existingAppointment)
-
+      
       if (existingAppointment) {
-        res
-          .status(400)
-          .json(new ApiError(400, "You have already appointment in this time"));
-        return;
+        throw new AppError("You already have an appointment in this time slot", 409);
       }
-      // Create appointment and update time slot status
-      const [appointment, updatedTimeSlot] = await Promise.all([
-        prisma.appointment.create({
-          data: {
-            patientId: patient.id,
-            doctorId: timeSlot.doctorId,
-            timeSlotId,
-            date: timeSlot.startTime,
-            time: timeSlot.startTime.toTimeString().slice(0, 5), // Extract HH:mm format
-            status: AppointmentStatus.PENDING,
-          },
-          include: {
-            patient: {
-              select: {
-                user: {
-                  select: {
-                    name: true,
-                  },
+
+      const updateResult = await prisma.timeSlot.updateMany({
+        where: { id: timeSlotId, status: TimeSlotStatus.AVAILABLE },
+        data: { status: TimeSlotStatus.BOOKED },
+      });
+
+      if (updateResult.count === 0) {
+        throw new ApiError(400, "Time slot is already booked");
+      }
+
+      const appointment = await prisma.appointment.create({
+        data: {
+          patientId: patient.id,
+          doctorId: timeSlot.doctorId,
+          timeSlotId,
+          date: timeSlot.startTime,
+          time: timeSlot.startTime.toTimeString().slice(0, 5),
+          status: AppointmentStatus.PENDING,
+        },
+        include: {
+          patient: {
+            select: {
+              user: {
+                select: {
+                  name: true,
                 },
               },
             },
-            doctor: {
-              select: {
-                user: {
-                  select: {
-                    name: true,
-                  },
-                },
-                specialty: true,
-                clinicLocation: true,
-              },
-            },
-            timeSlot: true,
           },
-        }),
-        prisma.timeSlot.update({
-          where: { id: timeSlotId },
-          data: { status: TimeSlotStatus.BOOKED },
-        }),
-      ]);
+          doctor: {
+            select: {
+              user: {
+                select: {
+                  name: true,
+                },
+              },
+              specialty: true,
+              clinicLocation: true,
+            },
+          },
+          timeSlot: true,
+        },
+      });
+
+      const updatedTimeSlot = await prisma.timeSlot.findUnique({ where: { id: timeSlotId } });
 
       return { appointment, updatedTimeSlot };
     });
 
-    // Format the response
     const formattedAppointment = {
       id: result?.appointment.id,
       status: result?.appointment.status,
@@ -313,7 +303,7 @@ const bookAppointment = async (req: any, res: Response): Promise<void> => {
       })
     );
   } catch (error) {
-    res.status(500).json(new ApiError(500, "Internal Server Error", [error]));
+    return next(error);
   }
 };
 
@@ -528,7 +518,6 @@ const cancelAppointment = async (req: Request, res: Response) => {
       },
     });
 
-    // Update time slot if it exists
     if (appointment?.timeSlotId) {
       await prisma.timeSlot.update({
         where: { id: appointment.timeSlotId },
@@ -536,6 +525,7 @@ const cancelAppointment = async (req: Request, res: Response) => {
           status: TimeSlotStatus.AVAILABLE,
         },
       });
+      await cacheService.delPattern(`timeslots:*`);
     }
     res
       .status(200)
@@ -682,7 +672,6 @@ const prescriptionPdf = async (req: Request, res: Response) => {
       .text("Doctor Information:", { continued: false });
     doc.moveDown(0.5);
 
-    // Doctor Name + Specialty
     doc
       .font("Helvetica")
       .fontSize(11)
@@ -701,9 +690,6 @@ const prescriptionPdf = async (req: Request, res: Response) => {
 
     doc.moveDown(1);
 
-    // ------------------------
-    // 3) Patient Section
-    // ------------------------
     drawHorizontalLine(doc, doc.y, "#dddddd");
     doc.moveDown(0.5);
 
@@ -726,13 +712,9 @@ const prescriptionPdf = async (req: Request, res: Response) => {
 
     doc.moveDown(1);
 
-    // ------------------------
-    // 4) Date Issued & Prescription Text
-    // ------------------------
     drawHorizontalLine(doc, doc.y, "#dddddd");
     doc.moveDown(0.5);
 
-    // Date Issued
     const formattedDate = new Date(prescription.dateIssued).toLocaleDateString(
       "en-IN",
       { day: "2-digit", month: "long", year: "numeric" }
@@ -747,11 +729,9 @@ const prescriptionPdf = async (req: Request, res: Response) => {
 
     doc.moveDown(1);
 
-    // Prescription Details Heading
     doc.font("Helvetica-Bold").fontSize(12).text("Prescription Details:");
     doc.moveDown(0.5);
 
-    // Prescription Text Box (bordered)
     const startX = doc.x;
     const boxWidth =
       doc.page.width - doc.page.margins.left - doc.page.margins.right;
@@ -762,7 +742,6 @@ const prescriptionPdf = async (req: Request, res: Response) => {
       lineGap: 4,
     };
 
-    // Draw a light gray box background
     const boxTop = doc.y;
     const estimatedHeight =
       doc.heightOfString(prescription.prescriptionText, textOptions) + 20;
@@ -773,14 +752,12 @@ const prescriptionPdf = async (req: Request, res: Response) => {
       .fill("#cccccc")
       .restore();
 
-    // Write the prescription text inside the box
     doc
       .font("Helvetica")
       .fontSize(11)
       .fillColor("#000000")
       .text(prescription.prescriptionText, startX, boxTop, textOptions);
 
-    // Move to end of box
     doc.moveDown(2);
 
     const footerY = doc.page.height - doc.page.margins.bottom - 40;
@@ -817,7 +794,6 @@ const cityRooms = async (req: Request, res: Response) => {
       return res.status(401).json(new ApiError(401, "User not authenticated"));
     }
 
-    // Get all city rooms that the patient can join
     const rooms = await prisma.room.findMany({
       include: {
         members: {
@@ -850,7 +826,6 @@ const cityRooms = async (req: Request, res: Response) => {
   }
 };
 
-// New direct appointment booking functions
 const bookDirectAppointment = async (
   req: any,
   res: Response
@@ -866,7 +841,6 @@ const bookDirectAppointment = async (
       return;
     }
 
-    // Validate required fields
     if (!doctorId || !date || !time) {
       res
         .status(400)
@@ -874,7 +848,6 @@ const bookDirectAppointment = async (
       return;
     }
 
-    // Validate appointment type
     if (appointmentType && !["ONLINE", "OFFLINE"].includes(appointmentType)) {
       res
         .status(400)
@@ -884,7 +857,6 @@ const bookDirectAppointment = async (
       return;
     }
 
-    // Validate date format (should be YYYY-MM-DD)
     const appointmentDate = new Date(date);
     if (isNaN(appointmentDate.getTime())) {
       res
@@ -893,7 +865,6 @@ const bookDirectAppointment = async (
       return;
     }
 
-    // Validate time format (should be HH:mm)
     const timeRegex = /^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$/;
     if (!timeRegex.test(time)) {
       res
@@ -902,7 +873,6 @@ const bookDirectAppointment = async (
       return;
     }
 
-    // Check if doctor exists
     const doctor = await prisma.doctor.findUnique({
       where: { id: doctorId },
       include: {
@@ -919,7 +889,6 @@ const bookDirectAppointment = async (
       return;
     }
 
-    // Check if patient exists
     const patient = await prisma.patient.findUnique({
       where: { id: patientId },
       include: {
@@ -936,7 +905,6 @@ const bookDirectAppointment = async (
       return;
     }
 
-    // Check if patient already has a pending appointment with this doctor
     const existingPendingAppointment = await prisma.appointment.findFirst({
       where: {
         patientId,
@@ -957,7 +925,6 @@ const bookDirectAppointment = async (
       return;
     }
 
-    // Check for conflicting appointments (same doctor, date, and time)
     const existingAppointment = await prisma.appointment.findFirst({
       where: {
         doctorId,
@@ -981,7 +948,6 @@ const bookDirectAppointment = async (
       return;
     }
 
-    // Create the appointment
     const appointment = await prisma.appointment.create({
       data: {
         patientId,
@@ -1016,7 +982,6 @@ const bookDirectAppointment = async (
       },
     });
 
-    // Format the response
     const formattedAppointment = {
       id: appointment.id,
       status: appointment.status,
@@ -1112,7 +1077,6 @@ const getAllPatientAppointments = async (
   }
 };
 
-// Notification functions for patients
 const getPatientNotifications = async (req: Request, res: Response): Promise<void> => {
   const userId = (req as any).user?.id;
   const { isRead } = req.query;
@@ -1153,7 +1117,7 @@ const getPatientNotifications = async (req: Request, res: Response): Promise<voi
 };
 
 const markNotificationAsRead = async (req: Request, res: Response): Promise<void> => {
-  const { notificationId } = req.params;
+  const notificationId = req.params.notificationId as string;
   const userId = (req as any).user?.id;
 
   try {
