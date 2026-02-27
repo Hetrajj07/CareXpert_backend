@@ -8,7 +8,7 @@ import { isValidUUID } from "../utils/helper";
 
 const VALID_ROLES: string[] = [Role.PATIENT, Role.DOCTOR, Role.ADMIN];
 
-const listAllUsers = async (req: Request, res: Response): Promise<void> => {
+const listAllUsers = async (req: Request, res: Response): Promise<any> => {
     try {
         const page = Math.max(1, parseInt(req.query.page as string) || 1);
         const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 10));
@@ -65,7 +65,7 @@ const listAllUsers = async (req: Request, res: Response): Promise<void> => {
 
         const totalPages = Math.ceil(totalCount / limit);
 
-        res.status(200).json(
+        return res.status(200).json(
             new ApiResponse(200, {
                 users,
                 pagination: {
@@ -79,13 +79,13 @@ const listAllUsers = async (req: Request, res: Response): Promise<void> => {
             }, "Users fetched successfully")
         );
     } catch (error) {
-        res
+        return res
             .status(500)
             .json(new ApiError(500, "Failed to fetch users", [error]));
     }
 };
 
-const verifyDoctor = async (req: Request, res: Response): Promise<void> => {
+const verifyDoctor = async (req: Request, res: Response): Promise<any> => {
     const doctorUserId = req.params.doctorUserId as string;
 
     if (!doctorUserId || !isValidUUID(doctorUserId)) {
@@ -132,11 +132,11 @@ const verifyDoctor = async (req: Request, res: Response): Promise<void> => {
             },
         });
 
-        res
+        return res
             .status(200)
             .json(new ApiResponse(200, updatedDoctor, "Doctor verified successfully"));
     } catch (error) {
-        res
+        return res
             .status(500)
             .json(new ApiError(500, "Failed to verify doctor", [error]));
     }
@@ -145,7 +145,7 @@ const verifyDoctor = async (req: Request, res: Response): Promise<void> => {
 const getDashboardStats = async (
     req: Request,
     res: Response
-): Promise<void> => {
+): Promise<any> => {
     try {
         const [
             totalUsers,
@@ -195,17 +195,17 @@ const getDashboardStats = async (
             },
         };
 
-        res
+        return res
             .status(200)
             .json(new ApiResponse(200, stats, "Dashboard statistics fetched successfully"));
     } catch (error) {
-        res
+        return res
             .status(500)
             .json(new ApiError(500, "Failed to fetch dashboard statistics", [error]));
     }
 };
 
-const softDeleteUser = async (req: Request, res: Response): Promise<void> => {
+const softDeleteUser = async (req: Request, res: Response): Promise<any> => {
     const userId = req.params.userId as string;
     const adminUserId = (req as any).user?.id;
 
@@ -246,17 +246,17 @@ const softDeleteUser = async (req: Request, res: Response): Promise<void> => {
             },
         });
 
-        res
+        return res
             .status(200)
             .json(new ApiResponse(200, deletedUser, "User soft deleted successfully"));
     } catch (error) {
-        res
+        return res
             .status(500)
             .json(new ApiError(500, "Failed to delete user", [error]));
     }
 };
 
-const changeUserRole = async (req: Request, res: Response): Promise<void> => {
+const changeUserRole = async (req: Request, res: Response): Promise<any> => {
     const userId = req.params.userId as string;
     const { role, specialty, clinicLocation, location } = req.body;
     const adminUserId = (req as any).user?.id;
@@ -303,7 +303,7 @@ const changeUserRole = async (req: Request, res: Response): Promise<void> => {
             return;
         }
 
-        const updatedUser = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+        const updatedUser = await prisma.$transaction(async (tx) => {
 
             const updated = await tx.user.update({
                 where: { id: userId },
@@ -351,11 +351,11 @@ const changeUserRole = async (req: Request, res: Response): Promise<void> => {
             return updated;
         });
 
-        res
+        return res
             .status(200)
             .json(new ApiResponse(200, updatedUser, "User role updated successfully"));
     } catch (error) {
-        res
+        return res
             .status(500)
             .json(new ApiError(500, "Failed to change user role", [error]));
     }
